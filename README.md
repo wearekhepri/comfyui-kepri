@@ -12,7 +12,7 @@ They are designed to be lightweight, zero-dependency (only `torch`), and suited 
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/wearekhepri/comfyui-kepri-nodes-pack.git
+git clone https://github.com/wearekhepri/comfyui-kepri.git
 ```
 
 Restart ComfyUI and refresh your browser. The nodes will appear under the **Kepri** category in the Add Node menu.
