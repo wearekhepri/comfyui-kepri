@@ -5,17 +5,26 @@ class KepriImageFinalize:
     """
     One-stop finalisation node for the Kepri Background Removal V2 pipeline.
 
-    After RMBG (or any background-removal step) you usually need to:
-      1. Resize by longest edge to a fixed pixel count (e.g. 2048).
-      2. Crop / pad to a target aspect ratio (square, 4:3, …).
-      3. Composite the cut-out onto a background:
-         - transparent  (keep RGB + mask for downstream use)
-         - solid color  (#hex colour exposed via API)
-         - image preset (concrete, wood, marble … exposed via API).
+    After RMBG (or any background-removal step) you usually need to do the same
+    boring chores at the very end of a workflow.  This node does them all in one
+    torch-only pass, in the order that actually matters:
 
-    All three steps are done in a single torch-only node so the workflow
-    stays compact and every parameter can be wired to a workflow API input
-    (prompt variable) when the workflow is executed from Modal / RunPod / Kepri.
+      1. Find the object (bounding box of the mask) and re-centre it.
+         Without a mask, the whole frame is treated as the object.
+      2. Add padding (breathing room) around the centred object — height and
+         width independently, in percent (of the object) or in pixels (of the
+         final output).
+      3. Frame to a target aspect ratio (square, 4:3, original …).
+      4. Composite onto a background — and only now, so the padding is already
+         baked in:
+           - transparent  (keep RGB + mask for downstream use)
+           - solid color  (#RRGGBBAA via the KEPRI_COLOR picker)
+           - image preset (concrete, wood, marble …), cover-cropped to the
+             final canvas — so the padding fixes exactly how much of the
+             background image shows.
+
+    Every parameter can be wired to a workflow API input (prompt variable) when
+    the workflow is executed from Modal / RunPod / Kepri.
     """
 
     CATEGORY = "Kepri/Background"
@@ -33,6 +42,12 @@ class KepriImageFinalize:
                     ["original", "1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2", "5:4", "4:5"],
                     {"default": "1:1"},
                 ),
+                "padding_unit": (
+                    ["percent", "pixels"],
+                    {"default": "percent"},
+                ),
+                "padding_h": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 4096.0, "step": 0.5, "tooltip": "Marge verticale (haut ET bas) autour de l'objet centré. Unité = padding_unit. En 'percent' = % de la hauteur de l'objet ; en 'pixels' = px dans la résolution finale. Appliqué AVANT le fond."}),
+                "padding_w": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 4096.0, "step": 0.5, "tooltip": "Marge horizontale (gauche ET droite) autour de l'objet centré. Unité = padding_unit. En 'percent' = % de la largeur de l'objet ; en 'pixels' = px dans la résolution finale. Appliqué AVANT le fond."}),
                 "background_mode": (
                     ["transparent", "color", "image_preset"],
                     {"default": "color"},
@@ -66,14 +81,27 @@ class KepriImageFinalize:
         return torch.tensor([r, g, b], dtype=torch.float32, device=device), float(a)
 
     @staticmethod
-    def _resize_longest(img, msk, target):
-        """Resize so that the longest side == target.  img: [B,H,W,C]."""
-        B, H, W, C = img.shape
-        if H >= W:
-            new_h, new_w = target, int(round(W * target / H))
-        else:
-            new_w, new_h = target, int(round(H * target / W))
-        img = (
+    def _object_bbox(mask, thresh=0.1):
+        """Union bounding box of the object across the batch.
+
+        mask: [B,H,W] in 0..1.  Returns (y0, y1, x0, x1) with y1/x1 exclusive,
+        or None when the mask is empty (caller then uses the full frame).
+        """
+        if mask is None:
+            return None
+        m = mask > thresh
+        if not bool(m.any()):
+            return None
+        rows = m.any(dim=0).any(dim=1)   # [H] : any batch, any column
+        cols = m.any(dim=0).any(dim=0)   # [W] : any batch, any row
+        ys = torch.nonzero(rows, as_tuple=False).flatten()
+        xs = torch.nonzero(cols, as_tuple=False).flatten()
+        return (int(ys[0]), int(ys[-1]) + 1, int(xs[0]), int(xs[-1]) + 1)
+
+    @staticmethod
+    def _resize_image(img, new_h, new_w):
+        """Bicubic resize of [B,H,W,C] → [B,new_h,new_w,C], clamped to 0..1."""
+        return (
             torch.nn.functional.interpolate(
                 img.permute(0, 3, 1, 2),
                 size=(new_h, new_w),
@@ -83,56 +111,20 @@ class KepriImageFinalize:
             .permute(0, 2, 3, 1)
             .clamp(0.0, 1.0)
         )
-        if msk is not None:
-            msk = (
-                torch.nn.functional.interpolate(
-                    msk.unsqueeze(1),
-                    size=(new_h, new_w),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                .squeeze(1)
-                .clamp(0.0, 1.0)
-            )
-        return img, msk, new_h, new_w
 
     @staticmethod
-    def _crop_or_pad(img, msk, target_h, target_w):
-        """Center crop if too big, center pad (black/transparent) if too small."""
-        B, H, W, C = img.shape
-
-        # ---- pad ----
-        pad_h = max(0, target_h - H)
-        pad_w = max(0, target_w - W)
-        if pad_h or pad_w:
-            top = pad_h // 2
-            bot = pad_h - top
-            left = pad_w // 2
-            right = pad_w - left
-            img = torch.nn.functional.pad(
-                img.permute(0, 3, 1, 2),
-                (left, right, top, bot),
-                mode="constant",
-                value=0,
-            ).permute(0, 2, 3, 1)
-            if msk is not None:
-                msk = torch.nn.functional.pad(
-                    msk.unsqueeze(1),
-                    (left, right, top, bot),
-                    mode="constant",
-                    value=0,
-                ).squeeze(1)
-            B, H, W, C = img.shape
-
-        # ---- crop ----
-        if H > target_h or W > target_w:
-            y0 = (H - target_h) // 2
-            x0 = (W - target_w) // 2
-            img = img[:, y0 : y0 + target_h, x0 : x0 + target_w, :]
-            if msk is not None:
-                msk = msk[:, y0 : y0 + target_h, x0 : x0 + target_w]
-
-        return img, msk
+    def _resize_mask(msk, new_h, new_w):
+        """Bilinear resize of [B,H,W] → [B,new_h,new_w], clamped to 0..1."""
+        return (
+            torch.nn.functional.interpolate(
+                msk.unsqueeze(1),
+                size=(new_h, new_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .squeeze(1)
+            .clamp(0.0, 1.0)
+        )
 
     @staticmethod
     def _resize_cover(img, target_h, target_w):
@@ -166,6 +158,9 @@ class KepriImageFinalize:
         image,
         longest_edge,
         aspect_ratio,
+        padding_unit,
+        padding_h,
+        padding_w,
         background_mode,
         background_color,
         mask=None,
@@ -174,77 +169,102 @@ class KepriImageFinalize:
         dev = image.device
         B, H, W, C = image.shape
 
-        # Strip alpha if present (RMBG outputs RGBA [B,H,W,4]).
-        # The alpha is carried separately by the mask input.
+        # RMBG outputs RGBA; the alpha is carried by the mask input, so drop it.
         if C == 4:
             image = image[..., :3]
             C = 3
 
-        # -- 1. resize by longest edge --------------------------------- #
-        img, msk, new_h, new_w = self._resize_longest(image, mask, longest_edge)
+        # -- 1. object bounding box (object-aware) -------------------------- #
+        # With a mask we crop to the object and re-centre it; without a mask
+        # the whole frame is treated as the "object".
+        bbox = self._object_bbox(mask) if mask is not None else None
+        if bbox is None:
+            y0, y1, x0, x1 = 0, H, 0, W
+        else:
+            y0, y1, x0, x1 = bbox
 
-        # -- 2. target aspect ratio ------------------------------------ #
+        obj_img = image[:, y0:y1, x0:x1, :]
+        obj_msk = mask[:, y0:y1, x0:x1] if mask is not None else None
+        oh, ow = (y1 - y0), (x1 - x0)
+        ratio_obj = ow / max(oh, 1)
+
+        # -- 2. final canvas size (longest_edge + aspect ratio) ------------- #
         if aspect_ratio == "original":
-            target_h, target_w = new_h, new_w
+            R = ratio_obj
         else:
             a, b = map(int, aspect_ratio.split(":"))
-            # keep the *larger* dimension, fit the other
-            if new_w >= new_h:
-                target_w = new_w
-                target_h = int(round(new_w * b / a))
-            else:
-                target_h = new_h
-                target_w = int(round(new_h * a / b))
+            R = a / b
+        if R >= 1.0:
+            Wc, Hc = longest_edge, max(1, int(round(longest_edge / R)))
+        else:
+            Hc, Wc = longest_edge, max(1, int(round(longest_edge * R)))
 
-        img, msk = self._crop_or_pad(img, msk, target_h, target_w)
+        # -- 3. object size inside the canvas, honouring the padding -------- #
+        # Padding is the *minimum* margin around the centred object.  The axis
+        # that is not the binding constraint just gets a larger margin (object
+        # stays centred); that extra space is filled by the background.
+        if padding_unit == "percent":
+            pw = max(0.0, padding_w) / 100.0
+            ph = max(0.0, padding_h) / 100.0
+            obj_w_max = Wc / (1.0 + 2.0 * pw)   # so margin == pw * object width
+            obj_h_max = Hc / (1.0 + 2.0 * ph)
+        else:  # pixels, measured in the final output resolution (per side)
+            obj_w_max = Wc - 2.0 * max(0.0, padding_w)
+            obj_h_max = Hc - 2.0 * max(0.0, padding_h)
+        obj_w_max = max(1.0, obj_w_max)
+        obj_h_max = max(1.0, obj_h_max)
 
-        # -- 3. background composite ----------------------------------- #
-        if background_mode == "transparent":
-            # passthrough — if user supplied a mask we pass it along,
-            # otherwise we output an all-white mask so downstream nodes
-            # do not crash.
-            if msk is None:
-                msk = torch.ones((B, target_h, target_w), dtype=torch.float32, device=dev)
-            return (img, msk)
+        scale = min(obj_w_max / ow, obj_h_max / oh)
+        new_ow = min(max(1, int(round(ow * scale))), Wc)
+        new_oh = min(max(1, int(round(oh * scale))), Hc)
 
-        # modes "color" and "image_preset" need a mask to composite cleanly.
-        # If the user did not plug a mask we assume the image is already
-        # flattened and just return it resized.
-        if msk is None:
-            return (img, torch.ones((B, target_h, target_w), dtype=torch.float32, device=dev))
+        obj_img = self._resize_image(obj_img, new_oh, new_ow)
+        if obj_msk is not None:
+            obj_msk = self._resize_mask(obj_msk, new_oh, new_ow)
 
-        # expand mask to [B,H,W,1]
-        alpha = msk.unsqueeze(-1)  # [B,H,W,1]
+        # -- 4. place the object centred on the canvas ---------------------- #
+        top = (Hc - new_oh) // 2
+        left = (Wc - new_ow) // 2
+        canvas_rgb = torch.zeros((B, Hc, Wc, 3), dtype=torch.float32, device=dev)
+        canvas_alpha = torch.zeros((B, Hc, Wc), dtype=torch.float32, device=dev)
+        canvas_rgb[:, top:top + new_oh, left:left + new_ow, :] = obj_img
+        if obj_msk is not None:
+            canvas_alpha[:, top:top + new_oh, left:left + new_ow] = obj_msk
+        else:
+            canvas_alpha[:, top:top + new_oh, left:left + new_ow] = 1.0
+
+        # -- 5. background composite (last, over the padded canvas) --------- #
+        alpha = canvas_alpha.unsqueeze(-1)   # [B,Hc,Wc,1]
         inv = 1.0 - alpha
 
+        if background_mode == "transparent":
+            return (canvas_rgb, canvas_alpha)
+
         if background_mode == "color":
-            bg_col, bg_alpha = self._hex_to_rgba(background_color, dev)  # [3], float
-            bg = bg_col.view(1, 1, 1, 3).expand(B, target_h, target_w, 3)
-            out = img * alpha + bg * inv
-            # Output opacity: the object stays fully opaque; the colour fills the
-            # background at its own alpha.  bg_alpha=1 → solid colour (fully
-            # opaque image) ; bg_alpha=0 → transparent background (== "transparent"
-            # mode) ; in between → semi-transparent coloured background.
+            bg_col, bg_alpha = self._hex_to_rgba(background_color, dev)
+            bg = bg_col.view(1, 1, 1, 3).expand(B, Hc, Wc, 3)
+            out = canvas_rgb * alpha + bg * inv
+            # bg_alpha=1 → solid colour ; =0 → transparent ; between → semi-
+            # transparent coloured background (opacity carried by the mask out).
             out_mask = (alpha + inv * bg_alpha).squeeze(-1)
             return (out, out_mask)
 
         # image_preset
         if background_image is None:
             # no preset provided → black fallback (user will see it and fix)
-            bg = torch.zeros((B, target_h, target_w, 3), dtype=torch.float32, device=dev)
+            bg = torch.zeros((B, Hc, Wc, 3), dtype=torch.float32, device=dev)
         else:
             bg = background_image.to(dev)
             # Strip alpha if present so both RGB and RGBA presets work.
             if bg.shape[-1] == 4:
                 bg = bg[..., :3]
-            # Zoom to cover — scale uniformly until the smallest dimension
-            # matches the target, then center-crop the excess.  No black bars.
-            bg = self._resize_cover(bg, target_h, target_w)
-            # match batch size
+            # Cover the *final* canvas (object + padding) → the padding fixes
+            # exactly how much of the background image is visible.
+            bg = self._resize_cover(bg, Hc, Wc)
             if bg.shape[0] < B:
                 bg = bg.repeat(B, 1, 1, 1)
             elif bg.shape[0] > B:
                 bg = bg[:B]
 
-        out = img * alpha + bg * inv
-        return (out, msk.squeeze(-1) if msk.ndim == 4 else msk)
+        out = canvas_rgb * alpha + bg * inv
+        return (out, canvas_alpha)
