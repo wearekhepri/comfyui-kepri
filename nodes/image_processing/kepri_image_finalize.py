@@ -37,7 +37,7 @@ class KepriImageFinalize:
                     ["transparent", "color", "image_preset"],
                     {"default": "color"},
                 ),
-                "background_color": ("STRING", {"default": "#FFFFFF", "multiline": False}),
+                "background_color": ("KEPRI_COLOR", {"default": "#FFFFFFFF", "tooltip": "Couleur de fond (mode 'color'). Clique la pastille = sélecteur RGB ; le slider règle l'opacité (alpha). Accepte #RRGGBB ou #RRGGBBAA."}),
             },
             "optional": {
                 "mask": ("MASK",),
@@ -47,14 +47,23 @@ class KepriImageFinalize:
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _hex_to_rgb_tensor(hex_str, device):
-        h = hex_str.lstrip("#")
+    def _hex_to_rgba(hex_str, device):
+        """Parse '#RRGGBB' or '#RRGGBBAA' (also '#RGB') → (rgb_tensor[3], alpha_float).
+
+        Falls back to opaque white on malformed input so the node never crashes
+        on a bad value coming from the API / a stale widget.
+        """
+        h = str(hex_str).lstrip("#").strip()
         if len(h) == 3:          # #RGB shorthand
             h = "".join([c * 2 for c in h])
-        r = int(h[0:2], 16) / 255.0
-        g = int(h[2:4], 16) / 255.0
-        b = int(h[4:6], 16) / 255.0
-        return torch.tensor([r, g, b], dtype=torch.float32, device=device)
+        try:
+            r = int(h[0:2], 16) / 255.0
+            g = int(h[2:4], 16) / 255.0
+            b = int(h[4:6], 16) / 255.0
+            a = int(h[6:8], 16) / 255.0 if len(h) >= 8 else 1.0
+        except (ValueError, IndexError):
+            r = g = b = a = 1.0
+        return torch.tensor([r, g, b], dtype=torch.float32, device=device), float(a)
 
     @staticmethod
     def _resize_longest(img, msk, target):
@@ -209,25 +218,33 @@ class KepriImageFinalize:
         inv = 1.0 - alpha
 
         if background_mode == "color":
-            bg_col = self._hex_to_rgb_tensor(background_color, dev)  # [3]
+            bg_col, bg_alpha = self._hex_to_rgba(background_color, dev)  # [3], float
             bg = bg_col.view(1, 1, 1, 3).expand(B, target_h, target_w, 3)
-        else:  # image_preset
-            if background_image is None:
-                # no preset provided → black fallback (user will see it and fix)
-                bg = torch.zeros((B, target_h, target_w, 3), dtype=torch.float32, device=dev)
-            else:
-                bg = background_image.to(dev)
-                # Strip alpha if present so both RGB and RGBA presets work.
-                if bg.shape[-1] == 4:
-                    bg = bg[..., :3]
-                # Zoom to cover — scale uniformly until the smallest dimension
-                # matches the target, then center-crop the excess.  No black bars.
-                bg = self._resize_cover(bg, target_h, target_w)
-                # match batch size
-                if bg.shape[0] < B:
-                    bg = bg.repeat(B, 1, 1, 1)
-                elif bg.shape[0] > B:
-                    bg = bg[:B]
+            out = img * alpha + bg * inv
+            # Output opacity: the object stays fully opaque; the colour fills the
+            # background at its own alpha.  bg_alpha=1 → solid colour (fully
+            # opaque image) ; bg_alpha=0 → transparent background (== "transparent"
+            # mode) ; in between → semi-transparent coloured background.
+            out_mask = (alpha + inv * bg_alpha).squeeze(-1)
+            return (out, out_mask)
+
+        # image_preset
+        if background_image is None:
+            # no preset provided → black fallback (user will see it and fix)
+            bg = torch.zeros((B, target_h, target_w, 3), dtype=torch.float32, device=dev)
+        else:
+            bg = background_image.to(dev)
+            # Strip alpha if present so both RGB and RGBA presets work.
+            if bg.shape[-1] == 4:
+                bg = bg[..., :3]
+            # Zoom to cover — scale uniformly until the smallest dimension
+            # matches the target, then center-crop the excess.  No black bars.
+            bg = self._resize_cover(bg, target_h, target_w)
+            # match batch size
+            if bg.shape[0] < B:
+                bg = bg.repeat(B, 1, 1, 1)
+            elif bg.shape[0] > B:
+                bg = bg[:B]
 
         out = img * alpha + bg * inv
         return (out, msk.squeeze(-1) if msk.ndim == 4 else msk)

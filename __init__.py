@@ -11,4 +11,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "KepriImageFinalize": "Kepri Image Finalize (Resize + Crop/Pad + Bg)",
 }
 
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+# Frontend assets (custom widgets, e.g. the KEPRI_COLOR colour picker).
+WEB_DIRECTORY = "./web"
+
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
