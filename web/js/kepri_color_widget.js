@@ -10,6 +10,15 @@
  *     ("KEPRI_COLOR", {"default": "#FFFFFFFF"})
  * to use it.
  *
+ * The widget auto-hides on a node that also has a "background_mode" combo:
+ * it is only shown while that combo == "color".
+ *
+ * Robustness notes (learned from live testing):
+ *   - slider drag is captured at the window level (does not rely on litegraph
+ *     routing pointermove to widget.mouse, which is version-dependent);
+ *   - the native colour <input> is positioned under the cursor at opacity 0
+ *     (an off-screen input never delivers "change" inside Electron/ComfyUI).
+ *
  * Part of comfyui-kepri (KEPRI). Original implementation.
  */
 
@@ -59,6 +68,8 @@ function drawCheckerboard(ctx, x, y, w, h, cell) {
     ctx.restore();
 }
 
+const HIDDEN_SIZE = [0, -4]; // collapses the widget slot (cancels the 4px gap)
+
 function makeColorWidget(name, inputData) {
     let initial = DEFAULT_COLOR;
     if (Array.isArray(inputData) && inputData[1] && inputData[1].default) {
@@ -70,7 +81,7 @@ function makeColorWidget(name, inputData) {
         type: "KEPRI_COLOR",
         value: normalizeRGBA(initial),
         options: { default: normalizeRGBA(initial) },
-        _dragging: false,
+        hidden: false,
         _swatch: null,
         _slider: null,
     };
@@ -78,10 +89,12 @@ function makeColorWidget(name, inputData) {
     const MARGIN = 15;
 
     widget.computeSize = function (width) {
+        if (this.hidden) return [0, HIDDEN_SIZE[1]];
         return [width, 52];
     };
 
     widget.draw = function (ctx, node, width, posY, height) {
+        if (this.hidden) return;
         const value = normalizeRGBA(this.value);
         const rgb6 = rgbOf(value);
         const aByte = alphaByteOf(value);
@@ -156,46 +169,63 @@ function makeColorWidget(name, inputData) {
         r && pos[0] >= r.x0 && pos[0] <= r.x1 && pos[1] >= r.y0 && pos[1] <= r.y1;
 
     widget.mouse = function (event, pos, node) {
-        const t = event.type;
+        if (this.hidden) return false;
+        if (event.type !== "pointerdown") return false;
+        const self = this;
 
-        if (t === "pointermove" && this._dragging) {
-            setAlphaFromX(this, pos[0]);
-            node.setDirtyCanvas(true, true);
-            return true;
-        }
-        if (t === "pointerup") {
-            this._dragging = false;
-            return false;
-        }
-        if (t !== "pointerdown") return false;
-
-        // opacity slider: click or start drag
+        // -- opacity slider: set on click, then capture the drag at window
+        //    level so it keeps tracking even if litegraph stops routing
+        //    pointermove to this widget. --
         if (inside(this._slider, pos)) {
-            this._dragging = true;
-            setAlphaFromX(this, pos[0]);
+            setAlphaFromX(self, pos[0]);
             node.setDirtyCanvas(true, true);
+
+            const startClientX = event.clientX;
+            const startLocalX = pos[0];
+            const scale = (app.canvas && app.canvas.ds && app.canvas.ds.scale) || 1;
+            const onMove = (e) => {
+                // delta in client px → node-local px (translation cancels out)
+                const localX = startLocalX + (e.clientX - startClientX) / scale;
+                setAlphaFromX(self, localX);
+                node.setDirtyCanvas(true, true);
+            };
+            const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp);
             return true;
         }
 
-        // swatch: open native RGB picker, keep current alpha
+        // -- swatch: open the native RGB picker, keep current alpha --
         if (inside(this._swatch, pos)) {
             const picker = document.createElement("input");
             picker.type = "color";
             picker.value = rgbOf(normalizeRGBA(this.value));
-            picker.style.position = "absolute";
-            picker.style.left = "-9999px";
-            picker.style.top = "-9999px";
+            // Position it under the cursor at opacity 0: an off-screen input
+            // never fires "change" inside Electron / the ComfyUI desktop app.
+            picker.style.position = "fixed";
+            picker.style.left = (event.clientX || 0) + "px";
+            picker.style.top = (event.clientY || 0) + "px";
+            picker.style.width = "1px";
+            picker.style.height = "1px";
+            picker.style.opacity = "0";
+            picker.style.border = "0";
+            picker.style.padding = "0";
+            picker.style.pointerEvents = "none";
             document.body.appendChild(picker);
 
-            const self = this;
             const apply = (close) => {
                 self.value = withRGB(normalizeRGBA(self.value), picker.value);
                 if (node.graph) node.graph._version++;
                 node.setDirtyCanvas(true, true);
-                if (close) picker.remove();
+                if (close && picker.parentNode) picker.remove();
             };
             picker.addEventListener("input", () => apply(false));
             picker.addEventListener("change", () => apply(true));
+            // safety net: drop the element if the dialog is dismissed
+            picker.addEventListener("blur", () => apply(true));
             picker.click();
             return true;
         }
@@ -204,6 +234,36 @@ function makeColorWidget(name, inputData) {
     };
 
     return widget;
+}
+
+// --- conditional visibility: show the KEPRI_COLOR widget only while the
+//     node's "background_mode" combo == "color" -------------------------- //
+function setColorWidgetVisible(node, widget, visible) {
+    if (!widget) return;
+    widget.hidden = !visible;
+    const sz = node.computeSize();
+    node.setSize([Math.max(node.size[0], sz[0]), sz[1]]);
+    node.setDirtyCanvas(true, true);
+}
+
+function wireConditionalVisibility(node) {
+    const widgets = node.widgets || [];
+    const colorWidget = widgets.find((w) => w.type === "KEPRI_COLOR");
+    const modeWidget = widgets.find((w) => w.name === "background_mode");
+    if (!colorWidget || !modeWidget) return;
+
+    const update = () =>
+        setColorWidgetVisible(node, colorWidget, modeWidget.value === "color");
+
+    const prev = modeWidget.callback;
+    modeWidget.callback = function (...args) {
+        const r = prev ? prev.apply(this, args) : undefined;
+        update();
+        return r;
+    };
+
+    // defer one tick so a loaded workflow's restored combo value is applied
+    setTimeout(update, 0);
 }
 
 app.registerExtension({
@@ -216,5 +276,8 @@ app.registerExtension({
                 minHeight: 52,
             }),
         };
+    },
+    nodeCreated(node) {
+        wireConditionalVisibility(node);
     },
 });
