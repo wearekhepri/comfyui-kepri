@@ -42,17 +42,22 @@ class KepriImageFinalize:
                     ["original", "1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2", "5:4", "4:5"],
                     {"default": "1:1"},
                 ),
+                "background_mode": (
+                    ["transparent", "color", "image_preset"],
+                    {"default": "color"},
+                ),
+                "background_color": ("KEPRI_COLOR", {"default": "#FFFFFFFF", "tooltip": "Couleur de fond (mode 'color'). Clique la pastille = sélecteur RGB ; le slider règle l'opacité (alpha). Accepte #RRGGBB ou #RRGGBBAA."}),
+                # NOTE: the padding widgets are intentionally kept LAST.  ComfyUI
+                # restores widget values by *position*, so appending new widgets
+                # (rather than inserting them in the middle) prevents the values
+                # of workflows saved before padding existed from shifting onto
+                # the wrong widgets.
                 "padding_unit": (
                     ["percent", "pixels"],
                     {"default": "percent"},
                 ),
                 "padding_h": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 4096.0, "step": 0.5, "tooltip": "Marge verticale (haut ET bas) autour de l'objet centré. Unité = padding_unit. En 'percent' = % de la hauteur de l'objet ; en 'pixels' = px dans la résolution finale. Appliqué AVANT le fond."}),
                 "padding_w": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 4096.0, "step": 0.5, "tooltip": "Marge horizontale (gauche ET droite) autour de l'objet centré. Unité = padding_unit. En 'percent' = % de la largeur de l'objet ; en 'pixels' = px dans la résolution finale. Appliqué AVANT le fond."}),
-                "background_mode": (
-                    ["transparent", "color", "image_preset"],
-                    {"default": "color"},
-                ),
-                "background_color": ("KEPRI_COLOR", {"default": "#FFFFFFFF", "tooltip": "Couleur de fond (mode 'color'). Clique la pastille = sélecteur RGB ; le slider règle l'opacité (alpha). Accepte #RRGGBB ou #RRGGBBAA."}),
             },
             "optional": {
                 "mask": ("MASK",),
@@ -158,11 +163,11 @@ class KepriImageFinalize:
         image,
         longest_edge,
         aspect_ratio,
+        background_mode,
+        background_color,
         padding_unit,
         padding_h,
         padding_w,
-        background_mode,
-        background_color,
         mask=None,
         background_image=None,
     ):

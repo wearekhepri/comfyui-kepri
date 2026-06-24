@@ -27,11 +27,13 @@ When the object's aspect ratio differs from the chosen format, the two paddings 
 | `image` | IMAGE | *Required* | The cut-out image from upstream nodes `[B, H, W, 3]` or `[B, H, W, 4]`. |
 | `longest_edge` | INT | `2048` | Resolution of the **longest side of the final canvas** (e.g. `2048` for high-res e-commerce). |
 | `aspect_ratio` | COMBO | `1:1` | Target canvas shape: `original`, `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `2:3`, `3:2`, `5:4`, `4:5`. `original` = the object's own bounding-box ratio. |
+| `background_mode` | COMBO | `color` | `transparent`, `color`, or `image_preset`. |
+| `background_color` | KEPRI_COLOR | `#FFFFFFFF` | Background colour for `background_mode == color`. In-node picker (swatch → native RGB picker) + opacity slider (alpha). Value is `#RRGGBB` or `#RRGGBBAA`. |
 | `padding_unit` | COMBO | `percent` | `percent` = padding is a % of the object's size; `pixels` = padding in final-output pixels. |
 | `padding_h` | FLOAT | `0.0` | Vertical margin (top **and** bottom) around the centred object. `0` = object as large as possible. |
 | `padding_w` | FLOAT | `0.0` | Horizontal margin (left **and** right) around the centred object. `0` = object as large as possible. |
-| `background_mode` | COMBO | `color` | `transparent`, `color`, or `image_preset`. |
-| `background_color` | KEPRI_COLOR | `#FFFFFFFF` | Background colour for `background_mode == color`. In-node picker (swatch → native RGB picker) + opacity slider (alpha). Value is `#RRGGBB` or `#RRGGBBAA`. |
+
+> The padding widgets are listed last because they are appended after `background_color` in the node — appending (not inserting) keeps workflows saved before padding existed from shifting their widget values.
 | `mask` | MASK | *Optional* | Alpha mask from background removal. Drives the object-aware crop and clean compositing. Without it, the whole frame is used. |
 | `background_image` | IMAGE | *Optional* | Preset photo used when `background_mode == image_preset`. |
 

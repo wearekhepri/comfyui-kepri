@@ -70,6 +70,20 @@ function drawCheckerboard(ctx, x, y, w, h, cell) {
 
 const HIDDEN_SIZE = [0, -4]; // collapses the widget slot (cancels the 4px gap)
 
+// Force an immediate repaint.  Value changes that originate *outside* litegraph's
+// own interaction loop — the native colour dialog's "input"/"change" events and
+// the window-level slider drag — mark the canvas dirty but do not schedule a
+// frame, so the swatch / slider would only refresh on the next unrelated
+// interaction (e.g. toggling the mode combo).  Drawing explicitly fixes that.
+function forceRedraw(node) {
+    if (node && node.graph) node.graph._version++;
+    if (node && node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+    if (app.canvas) {
+        if (app.canvas.setDirty) app.canvas.setDirty(true, true);
+        if (typeof app.canvas.draw === "function") app.canvas.draw(true, true);
+    }
+}
+
 function makeColorWidget(name, inputData) {
     let initial = DEFAULT_COLOR;
     if (Array.isArray(inputData) && inputData[1] && inputData[1].default) {
@@ -178,7 +192,7 @@ function makeColorWidget(name, inputData) {
         //    pointermove to this widget. --
         if (inside(this._slider, pos)) {
             setAlphaFromX(self, pos[0]);
-            node.setDirtyCanvas(true, true);
+            forceRedraw(node);
 
             const startClientX = event.clientX;
             const startLocalX = pos[0];
@@ -187,7 +201,7 @@ function makeColorWidget(name, inputData) {
                 // delta in client px → node-local px (translation cancels out)
                 const localX = startLocalX + (e.clientX - startClientX) / scale;
                 setAlphaFromX(self, localX);
-                node.setDirtyCanvas(true, true);
+                forceRedraw(node);
             };
             const onUp = () => {
                 window.removeEventListener("pointermove", onMove);
@@ -218,8 +232,7 @@ function makeColorWidget(name, inputData) {
 
             const apply = (close) => {
                 self.value = withRGB(normalizeRGBA(self.value), picker.value);
-                if (node.graph) node.graph._version++;
-                node.setDirtyCanvas(true, true);
+                forceRedraw(node);
                 if (close && picker.parentNode) picker.remove();
             };
             picker.addEventListener("input", () => apply(false));
