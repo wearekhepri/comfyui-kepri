@@ -11,7 +11,7 @@ It replaces complex chains of crop / resize / pad / composite nodes with a singl
 3. **Aspect ratio / format**: the chosen ratio (`1:1`, `4:3`, `original`, …) defines the **shape** of the final canvas; `longest_edge` defines its **resolution**. The object is scaled (never distorted, never re-cropped) to fit inside the canvas while respecting the padding.
 4. **Background compositing** (last): merges the object onto the chosen background:
    - **Transparent**: passes the alpha mask through.
-   - **Solid Color**: fills the background with a colour chosen via the in-node colour picker (click the swatch → native RGB picker) with an **opacity slider** (alpha). Opacity `1.0` = solid colour, `0.0` = transparent, in between = semi-transparent coloured background.
+   - **Solid Color**: fills the background with a colour chosen via the in-node colour picker (click the swatch → native browser colour picker) plus a separate **`background_opacity`** value. Opacity `1.0` = solid colour, `0.0` = transparent, in between = semi-transparent coloured background.
    - **Image Preset**: composites the object onto a reference photo (concrete, wood, marble…). Uses a `cover` scaling mode against the **final canvas**, so the padding fixes exactly how much of the background image shows — no stretching, no black bars.
 
 ## Padding semantics
@@ -28,10 +28,11 @@ When the object's aspect ratio differs from the chosen format, the two paddings 
 | `longest_edge` | INT | `2048` | Resolution of the **longest side of the final canvas** (e.g. `2048` for high-res e-commerce). |
 | `aspect_ratio` | COMBO | `1:1` | Target canvas shape: `original`, `1:1`, `4:3`, `3:4`, `16:9`, `9:16`, `2:3`, `3:2`, `5:4`, `4:5`. `original` = the object's own bounding-box ratio. |
 | `background_mode` | COMBO | `color` | `transparent`, `color`, or `image_preset`. |
-| `background_color` | KEPRI_COLOR | `#FFFFFFFF` | Background colour for `background_mode == color`. In-node picker (swatch → native RGB picker) + opacity slider (alpha). Value is `#RRGGBB` or `#RRGGBBAA`. |
+| `background_color` | KEPRI_COLOR | `#FFFFFF` | Background colour for `background_mode == color`. Click the swatch → native browser colour picker. Value is `#RRGGBB`. |
+| `background_opacity` | FLOAT | `1.0` | Opacity of the colour background (color mode). `1` = solid, `0` = transparent, in between = semi-transparent. |
 | `padding_unit` | COMBO | `percent` | `percent` = padding is a % of the object's size; `pixels` = padding in final-output pixels. |
-| `padding_h` | FLOAT | `0.0` | Vertical margin (top **and** bottom) around the centred object. `0` = object as large as possible. |
-| `padding_w` | FLOAT | `0.0` | Horizontal margin (left **and** right) around the centred object. `0` = object as large as possible. |
+| `padding_h` | INT | `0` | Vertical margin (top **and** bottom) around the centred object. `0` = object as large as possible. |
+| `padding_w` | INT | `0` | Horizontal margin (left **and** right) around the centred object. `0` = object as large as possible. |
 
 > The padding widgets are listed last because they are appended after `background_color` in the node — appending (not inserting) keeps workflows saved before padding existed from shifting their widget values.
 | `mask` | MASK | *Optional* | Alpha mask from background removal. Drives the object-aware crop and clean compositing. Without it, the whole frame is used. |

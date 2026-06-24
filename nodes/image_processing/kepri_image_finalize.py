@@ -18,7 +18,7 @@ class KepriImageFinalize:
       4. Composite onto a background — and only now, so the padding is already
          baked in:
            - transparent  (keep RGB + mask for downstream use)
-           - solid color  (#RRGGBBAA via the KEPRI_COLOR picker)
+           - solid color  (#RRGGBB picker + a separate background_opacity)
            - image preset (concrete, wood, marble …), cover-cropped to the
              final canvas — so the padding fixes exactly how much of the
              background image shows.
@@ -46,7 +46,8 @@ class KepriImageFinalize:
                     ["transparent", "color", "image_preset"],
                     {"default": "color"},
                 ),
-                "background_color": ("KEPRI_COLOR", {"default": "#FFFFFFFF", "tooltip": "Couleur de fond (mode 'color'). Clique la pastille = sélecteur RGB ; le slider règle l'opacité (alpha). Accepte #RRGGBB ou #RRGGBBAA."}),
+                "background_color": ("KEPRI_COLOR", {"default": "#FFFFFF", "tooltip": "Couleur de fond (mode 'color'). Clique la pastille = sélecteur de couleur natif du navigateur. Format #RRGGBB."}),
+                "background_opacity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Opacité du fond (mode 'color' uniquement). 1 = couleur pleine, 0 = fond transparent, entre = fond semi-transparent (l'opacité est portée par la sortie mask)."}),
                 # NOTE: the padding widgets are intentionally kept LAST.  ComfyUI
                 # restores widget values by *position*, so appending new widgets
                 # (rather than inserting them in the middle) prevents the values
@@ -56,8 +57,8 @@ class KepriImageFinalize:
                     ["percent", "pixels"],
                     {"default": "percent"},
                 ),
-                "padding_h": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 4096.0, "step": 0.5, "tooltip": "Marge verticale (haut ET bas) autour de l'objet centré. Unité = padding_unit. En 'percent' = % de la hauteur de l'objet ; en 'pixels' = px dans la résolution finale. Appliqué AVANT le fond."}),
-                "padding_w": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 4096.0, "step": 0.5, "tooltip": "Marge horizontale (gauche ET droite) autour de l'objet centré. Unité = padding_unit. En 'percent' = % de la largeur de l'objet ; en 'pixels' = px dans la résolution finale. Appliqué AVANT le fond."}),
+                "padding_h": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "Marge verticale (haut ET bas) autour de l'objet centré. Unité = padding_unit ci-dessus. En 'percent' = % de la hauteur de l'objet (ex: 10) ; en 'pixels' = nb de px dans la résolution finale. Appliqué AVANT le fond."}),
+                "padding_w": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "Marge horizontale (gauche ET droite) autour de l'objet centré. Unité = padding_unit ci-dessus. En 'percent' = % de la largeur de l'objet (ex: 10) ; en 'pixels' = nb de px dans la résolution finale. Appliqué AVANT le fond."}),
             },
             "optional": {
                 "mask": ("MASK",),
@@ -67,11 +68,11 @@ class KepriImageFinalize:
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _hex_to_rgba(hex_str, device):
-        """Parse '#RRGGBB' or '#RRGGBBAA' (also '#RGB') → (rgb_tensor[3], alpha_float).
+    def _hex_to_rgb(hex_str, device):
+        """Parse '#RRGGBB' (also '#RGB', tolerates a trailing alpha) → rgb_tensor[3].
 
-        Falls back to opaque white on malformed input so the node never crashes
-        on a bad value coming from the API / a stale widget.
+        Falls back to white on malformed input so the node never crashes on a bad
+        value coming from the API / a stale widget.
         """
         h = str(hex_str).lstrip("#").strip()
         if len(h) == 3:          # #RGB shorthand
@@ -80,10 +81,9 @@ class KepriImageFinalize:
             r = int(h[0:2], 16) / 255.0
             g = int(h[2:4], 16) / 255.0
             b = int(h[4:6], 16) / 255.0
-            a = int(h[6:8], 16) / 255.0 if len(h) >= 8 else 1.0
         except (ValueError, IndexError):
-            r = g = b = a = 1.0
-        return torch.tensor([r, g, b], dtype=torch.float32, device=device), float(a)
+            r = g = b = 1.0
+        return torch.tensor([r, g, b], dtype=torch.float32, device=device)
 
     @staticmethod
     def _object_bbox(mask, thresh=0.1):
@@ -165,6 +165,7 @@ class KepriImageFinalize:
         aspect_ratio,
         background_mode,
         background_color,
+        background_opacity,
         padding_unit,
         padding_h,
         padding_w,
@@ -246,11 +247,12 @@ class KepriImageFinalize:
             return (canvas_rgb, canvas_alpha)
 
         if background_mode == "color":
-            bg_col, bg_alpha = self._hex_to_rgba(background_color, dev)
+            bg_col = self._hex_to_rgb(background_color, dev)
+            bg_alpha = float(max(0.0, min(1.0, background_opacity)))
             bg = bg_col.view(1, 1, 1, 3).expand(B, Hc, Wc, 3)
             out = canvas_rgb * alpha + bg * inv
-            # bg_alpha=1 → solid colour ; =0 → transparent ; between → semi-
-            # transparent coloured background (opacity carried by the mask out).
+            # background_opacity 1 → solid colour ; 0 → transparent ; between →
+            # semi-transparent coloured background (opacity carried by the mask).
             out_mask = (alpha + inv * bg_alpha).squeeze(-1)
             return (out, out_mask)
 
