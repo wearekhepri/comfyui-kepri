@@ -105,6 +105,13 @@ function makeColorWidget(name, inputData) {
             self.value = normalizeHex(picker.value);
             if (node.graph) node.graph._version++;
             node.setDirtyCanvas(true, true);
+            // A value change driven by a DOM event (the OS colour dialog) does
+            // not always schedule a redraw on its own, so poke the canvas
+            // directly — otherwise the swatch only refreshes on the next run.
+            if (app.canvas) {
+                if (app.canvas.setDirty) app.canvas.setDirty(true, true);
+                if (typeof app.canvas.draw === "function") app.canvas.draw(true, true);
+            }
             if (remove && picker.parentNode) picker.remove();
         };
         picker.addEventListener("input", () => commit(false));   // live preview
