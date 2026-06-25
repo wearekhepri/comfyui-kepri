@@ -244,7 +244,11 @@ class KepriImageFinalize:
         inv = 1.0 - alpha
 
         if background_mode == "transparent":
-            return (canvas_rgb, canvas_alpha)
+            # Cut the RGB too, not just the alpha: zero-out every pixel outside
+            # the mask so tools that ignore the alpha channel (and a plain
+            # SaveImage) still get the object only — no leftover background
+            # left inside the bbox rectangle.
+            return (canvas_rgb * alpha, canvas_alpha)
 
         if background_mode == "color":
             bg_col = self._hex_to_rgb(background_color, dev)
